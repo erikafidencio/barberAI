@@ -1,61 +1,56 @@
 import axios from "axios";
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(200).send("OK");
+  const message = req.body.message?.text;
+  const chatId = req.body.message?.chat.id;
+
+  if (!message || !chatId) {
+    return res.status(200).send("ok");
   }
 
-  let update;
-  try {
-    update = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
-  } catch (e) {
-    console.log("Parse error:", e.message);
-    return res.status(200).send("OK");
-  }
+  // Envia mensagem do usuário para o LLM
+  const llmResponse = await axios.post(
+    process.env.VERCEL_URL + "/api/llm",
+    { messageFromUser: message }
+  );
 
-  console.log("UPDATE:", update);
+  const { assistant_message, action } = llmResponse.data;
 
-  if (!update || !update.message) {
-    return res.status(200).send("OK");
-  }
+  // Primeiro envia a resposta do assistente
+  await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+    chat_id: chatId,
+    text: assistant_message
+  });
 
-  const chatId = update.message.chat.id;
-  const text = update.message.text || "";
-
-  const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-  const OPENAI_KEY = process.env.OPENAI_KEY;
-  const TELEGRAM_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-
-  let reply = "IA não configurada.";
-
-  if (OPENAI_KEY) {
-    try {
-      const r = await axios.post(
-        "https://api.openai.com/v1/chat/completions",
-        {
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: "Você é BarberAI, um atendente simpático e humano."},
-            { role: "user", content: text }
-          ]
-        },
-        { headers: { "Authorization": "Bearer " + OPENAI_KEY } }
+  // Se o LLM quer fazer uma ação (buscar horários ou agendar)
+  if (action && action.type) {
+    if (action.type === "check_times") {
+      const r = await axios.get(
+        process.env.VERCEL_URL + "/api/available-times",
+        { params: action.params }
       );
-      reply = r.data.choices[0].message.content;
-    } catch (e) {
-      reply = "Erro ao acessar IA.";
-      console.log("OpenAI ERROR:", e.response?.data || e.message);
+
+      const times = r.data.availableTimes.join(", ");
+
+      await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+        chat_id: chatId,
+        text: `Horários disponíveis: ${times}`
+      });
+    }
+
+    if (action.type === "create_schedule") {
+      const r = await axios.post(
+        process.env.VERCEL_URL + "/api/schedule",
+        action.params
+      );
+
+      await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+        chat_id: chatId,
+        text: `Agendamento confirmado! ID: ${r.data.id}`
+      });
     }
   }
 
-  try {
-    await axios.post(TELEGRAM_URL, {
-      chat_id: chatId,
-      text: reply
-    });
-  } catch (e) {
-    console.log("sendMessage ERROR:", e.response?.data || e.message);
-  }
-
-  return res.status(200).send("OK");
+  res.status(200).send("ok");
 }
+
